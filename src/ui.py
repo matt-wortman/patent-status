@@ -8,9 +8,12 @@ import webbrowser
 from datetime import datetime
 from typing import Optional
 import json
+import logging
 
 from . import database as db
 from . import uspto_api
+from .components.column_config import PATENT_COLUMNS
+from .components.data_table import DataTable
 from .credentials import get_api_key, store_api_key, has_api_key
 from .polling import PollingService, refresh_single_patent
 
@@ -57,6 +60,14 @@ class PatentStatusTracker(ctk.CTk):
         # Expanded patents state (for grouped updates view)
         self._load_expanded_state()
 
+        # Updates "days back" state (allows arbitrary values via entry field)
+        try:
+            self._last_valid_days = int(db.get_setting("updates_days", "7") or "7")
+            if self._last_valid_days < 1:
+                self._last_valid_days = 7
+        except ValueError:
+            self._last_valid_days = 7
+
         # Event type filter state
         self.selected_event_types = None  # None means show all
 
@@ -82,6 +93,8 @@ class PatentStatusTracker(ctk.CTk):
         """Apply font size to treeview widgets."""
         self.style.configure("Treeview", font=("Segoe UI", self.font_size), rowheight=self.font_size + 12)
         self.style.configure("Treeview.Heading", font=("Segoe UI", self.font_size, "bold"))
+        if hasattr(self, "patents_table"):
+            self.patents_table.set_font_size(self.font_size)
 
     def _load_expanded_state(self):
         """Load expanded patents state from settings."""
@@ -144,15 +157,15 @@ class PatentStatusTracker(ctk.CTk):
 
         ctk.CTkLabel(controls, text="Last:").pack(side="left", padx=(10, 5))
 
-        self.days_var = ctk.StringVar(value="7")
-        self.days_combo = ctk.CTkComboBox(
+        self.days_var = ctk.StringVar(value=str(self._last_valid_days))
+        self.days_entry = ctk.CTkEntry(
             controls,
-            values=["1", "7", "14", "30", "90"],
-            variable=self.days_var,
-            width=70,
-            command=self._on_days_changed
+            textvariable=self.days_var,
+            width=70
         )
-        self.days_combo.pack(side="left", padx=2)
+        self.days_entry.pack(side="left", padx=2)
+        self.days_entry.bind("<Return>", lambda _e: self._on_days_changed(self.days_var.get()))
+        self.days_entry.bind("<FocusOut>", lambda _e: self._on_days_changed(self.days_var.get()))
         ctk.CTkLabel(controls, text="days").pack(side="left", padx=(0, 15))
 
         # Event type filter
@@ -301,45 +314,20 @@ class PatentStatusTracker(ctk.CTk):
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
 
-        columns = ("app_number", "title", "status", "status_date", "applicant", "examiner")
-        self.patents_tree = ttk.Treeview(
+        self.patents_table = DataTable(
             table_frame,
-            columns=columns,
-            show="headings",
-            selectmode="browse"
+            table_id="patents",
+            columns=PATENT_COLUMNS,
+            on_double_click=self._on_patent_row_double_click,
+            on_right_click=self._on_patent_row_right_click,
+            font_size=self.font_size,
         )
-
-        # Column headings with sort command
-        self.patents_tree.heading("app_number", text="Application # ↕", command=lambda: self._sort_patents("app_number"))
-        self.patents_tree.heading("title", text="Title ↕", command=lambda: self._sort_patents("title"))
-        self.patents_tree.heading("status", text="Status ↕", command=lambda: self._sort_patents("status"))
-        self.patents_tree.heading("status_date", text="Status Date ↕", command=lambda: self._sort_patents("status_date"))
-        self.patents_tree.heading("applicant", text="Applicant ↕", command=lambda: self._sort_patents("applicant"))
-        self.patents_tree.heading("examiner", text="Examiner ↕", command=lambda: self._sort_patents("examiner"))
-
-        self.patents_tree.column("app_number", width=110, minwidth=100)
-        self.patents_tree.column("title", width=300, minwidth=150)
-        self.patents_tree.column("status", width=200, minwidth=100)
-        self.patents_tree.column("status_date", width=100, minwidth=80)
-        self.patents_tree.column("applicant", width=200, minwidth=100)
-        self.patents_tree.column("examiner", width=150, minwidth=100)
-
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.patents_tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.patents_tree.xview)
-        self.patents_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.patents_tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        # Bind double-click
-        self.patents_tree.bind("<Double-1>", self._on_patent_double_click)
-        self.patents_tree.bind("<Button-3>", self._show_patent_context_menu)
+        self.patents_table.grid(row=0, column=0, sticky="nsew")
 
         # Help text
         help_label = ctk.CTkLabel(
             self.tab_patents,
-            text="Double-click to open in USPTO | Right-click for more options | Click column headers to sort",
+            text="Click headers to sort | Drag headers to reorder | Drag edges to resize | Double-click to open in USPTO | Right-click for options",
             text_color="gray",
             font=ctk.CTkFont(size=11)
         )
@@ -558,7 +546,7 @@ class PatentStatusTracker(ctk.CTk):
         for item in self.updates_tree.get_children():
             self.updates_tree.delete(item)
 
-        days = int(self.days_var.get())
+        days = self._get_days_value()
 
         # Get event types to filter based on selection
         event_types = self._get_selected_event_types()
@@ -727,47 +715,13 @@ class PatentStatusTracker(ctk.CTk):
                 text = f"{text} ↕"
             self.updates_tree.heading(c, text=text)
 
-    def _sort_patents(self, col):
-        """Sort patents tree by column."""
-        items = [(self.patents_tree.item(i, 'values'), self.patents_tree.item(i, 'tags'))
-                 for i in self.patents_tree.get_children()]
-
-        # Toggle sort direction
-        if self.patents_sort_col == col:
-            self.patents_sort_reverse = not self.patents_sort_reverse
-        else:
-            self.patents_sort_col = col
-            self.patents_sort_reverse = False
-
-        col_idx = {"app_number": 0, "title": 1, "status": 2, "status_date": 3, "applicant": 4, "examiner": 5}.get(col, 0)
-        items.sort(key=lambda x: x[0][col_idx] or '', reverse=self.patents_sort_reverse)
-
-        # Clear and rebuild
-        for item in self.patents_tree.get_children():
-            self.patents_tree.delete(item)
-
-        for values, tags in items:
-            self.patents_tree.insert("", "end", values=values, tags=tags)
-
-        # Update heading to show sort direction
-        indicator = "▲" if not self.patents_sort_reverse else "▼"
-        col_names = {
-            "app_number": "Application #",
-            "title": "Title",
-            "status": "Status",
-            "status_date": "Status Date",
-            "applicant": "Applicant",
-            "examiner": "Examiner"
-        }
-        for c, name in col_names.items():
-            if c == col:
-                text = f"{name} {indicator}"
-            else:
-                text = f"{name} ↕"
-            self.patents_tree.heading(c, text=text)
-
     def _show_columns_dialog(self, table_type):
         """Show dialog to select visible columns."""
+        if table_type == "patents":
+            if hasattr(self, "patents_table"):
+                self.patents_table.show_column_selector()
+            return
+
         dialog = ctk.CTkToplevel(self)
         dialog.title("Select Columns")
         dialog.geometry("300x350")
@@ -786,22 +740,10 @@ class PatentStatusTracker(ctk.CTk):
             font=ctk.CTkFont(size=14)
         ).pack(pady=15)
 
-        # Get current visible columns from settings
-        if table_type == "updates":
-            all_cols = [("date", "Date"), ("event", "Event Code"), ("description", "Description")]
-            setting_key = "updates_columns"
-            tree = self.updates_tree
-        else:
-            all_cols = [
-                ("app_number", "Application #"),
-                ("title", "Title"),
-                ("status", "Status"),
-                ("status_date", "Status Date"),
-                ("applicant", "Applicant"),
-                ("examiner", "Examiner")
-            ]
-            setting_key = "patents_columns"
-            tree = self.patents_tree
+        # Updates-only: (All Patents uses tksheet selector)
+        all_cols = [("date", "Date"), ("event", "Event Code"), ("description", "Description")]
+        setting_key = "updates_columns"
+        tree = self.updates_tree
 
         # Load current visibility settings
         visible_json = db.get_setting(setting_key, None)
@@ -869,26 +811,67 @@ class PatentStatusTracker(ctk.CTk):
         except ValueError:
             messagebox.showwarning("Invalid", "Please enter a valid number.")
 
+    def _patent_to_row(self, patent: dict) -> dict:
+        app_raw = patent.get("application_number") or ""
+        return {
+            "application_number": app_raw,
+            "app_number": uspto_api.format_app_number(app_raw) if app_raw else "",
+            "title": patent.get("title") or "",
+            "current_status": patent.get("current_status") or "Not fetched",
+            "status_date": patent.get("status_date") or "",
+            "patent_number": patent.get("patent_number") or "",
+            "expiration_date": patent.get("expiration_date") or "",
+            "applicant": patent.get("applicant") or "",
+            "examiner": patent.get("examiner") or "",
+            "inventor": patent.get("inventor") or "",
+            "filing_date": patent.get("filing_date") or "",
+            "grant_date": patent.get("grant_date") or "",
+            "publication_number": patent.get("publication_number") or "",
+            "publication_date": patent.get("publication_date") or "",
+            "art_unit": patent.get("art_unit") or "",
+            "docket_number": patent.get("docket_number") or "",
+            "entity_status": patent.get("entity_status") or "",
+            "application_type_label": patent.get("application_type_label") or "",
+            "customer_number": patent.get("customer_number") or "",
+            "confirmation_number": patent.get("confirmation_number") or "",
+            "pta_total_days": patent.get("pta_total_days") if patent.get("pta_total_days") is not None else "",
+            "effective_filing_date": patent.get("effective_filing_date") or "",
+            "first_inventor_to_file": patent.get("first_inventor_to_file") or "",
+            "last_checked": patent.get("last_checked") or "",
+        }
+
     def _load_patents(self):
         """Load all patents into the patents table."""
-        for item in self.patents_tree.get_children():
-            self.patents_tree.delete(item)
-
         patents = db.get_all_patents()
+        rows = [self._patent_to_row(p) for p in patents]
 
-        for patent in patents:
-            app_num = uspto_api.format_app_number(patent['application_number'])
-            self.patents_tree.insert("", "end", values=(
-                app_num,
-                patent['title'] or '',
-                patent['current_status'] or 'Not fetched',
-                patent['status_date'] or '',
-                patent['applicant'] or '',
-                patent['examiner'] or ''
-            ), tags=(patent['application_number'],))
+        if hasattr(self, "patents_table"):
+            self.patents_table.set_data(rows)
 
-    def _on_days_changed(self, value):
+    def _get_days_value(self) -> int:
+        raw = (self.days_var.get() or "").strip()
+        try:
+            days = int(raw)
+            if days < 1:
+                raise ValueError
+            return days
+        except ValueError:
+            return self._last_valid_days
+
+    def _on_days_changed(self, _value=None):
         """Handle days filter change."""
+        raw = (self.days_var.get() or "").strip()
+        try:
+            days = int(raw)
+            if days < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Invalid", "Please enter a valid number of days (>= 1).")
+            self.days_var.set(str(self._last_valid_days))
+            return
+
+        self._last_valid_days = days
+        db.set_setting("updates_days", str(days))
         self._load_updates()
 
     def _on_refresh_click(self):
@@ -1003,18 +986,21 @@ class PatentStatusTracker(ctk.CTk):
 
     def _on_remove_patent(self):
         """Handle removing a patent."""
-        selection = self.patents_tree.selection()
-        if not selection:
+        if not hasattr(self, "patents_table"):
+            return
+
+        row = self.patents_table.get_selected_row()
+        if not row:
             messagebox.showinfo("Info", "Please select a patent to remove.")
             return
 
-        item = self.patents_tree.item(selection[0])
-        app_num = item['tags'][0] if item['tags'] else None
+        app_num = row.get("application_number")
+        if not app_num:
+            return
 
-        if app_num:
-            if messagebox.askyesno("Confirm", f"Remove patent {uspto_api.format_app_number(app_num)} from tracking?"):
-                db.remove_patent(app_num)
-                self._refresh_views()
+        if messagebox.askyesno("Confirm", f"Remove patent {uspto_api.format_app_number(app_num)} from tracking?"):
+            db.remove_patent(app_num)
+            self._refresh_views()
 
     def _on_update_double_click(self, event):
         """Handle double-click on update row."""
@@ -1027,20 +1013,21 @@ class PatentStatusTracker(ctk.CTk):
                 app_num = tags[0]
                 self._show_link_dialog(app_num)
 
-    def _on_patent_double_click(self, event):
-        """Handle double-click on patent row."""
-        selection = self.patents_tree.selection()
-        if selection:
-            item = self.patents_tree.item(selection[0])
-            app_num = item['tags'][0] if item['tags'] else None
-            if app_num:
-                self._show_link_dialog(app_num)
+    def _on_patent_row_double_click(self, row_data: dict):
+        """Handle double-click on a patent row in the tksheet table."""
+        app_num = row_data.get("application_number")
+        if app_num:
+            self._show_link_dialog(app_num)
+
+    def _on_patent_row_right_click(self, event, row_data: dict):
+        """Handle right-click on a patent row in the tksheet table."""
+        self._show_patent_context_menu(event, row_data=row_data)
 
     def _show_link_dialog(self, app_num: str):
         """Show dialog with links to USPTO sites."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Open in USPTO")
-        dialog.geometry("350x150")
+        dialog.geometry("380x220")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1057,30 +1044,42 @@ class PatentStatusTracker(ctk.CTk):
         ).pack(pady=15)
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(pady=10)
+        btn_frame.pack(padx=20, pady=(0, 10), fill="x")
 
         ctk.CTkButton(
             btn_frame,
             text="Patent Center",
             command=lambda: [webbrowser.open(uspto_api.get_patent_center_url(app_num)), dialog.destroy()],
-            width=130
-        ).pack(side="left", padx=10)
+        ).pack(fill="x", pady=5)
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Patent Center (Docs)",
+            command=lambda: [webbrowser.open(uspto_api.get_patent_center_documents_url(app_num)), dialog.destroy()],
+        ).pack(fill="x", pady=5)
 
         ctk.CTkButton(
             btn_frame,
             text="Public PAIR",
             command=lambda: [webbrowser.open(uspto_api.get_public_pair_url(app_num)), dialog.destroy()],
-            width=130
-        ).pack(side="left", padx=10)
+        ).pack(fill="x", pady=5)
 
-    def _show_patent_context_menu(self, event):
+        ctk.CTkLabel(
+            dialog,
+            text="If Patent Center shows /401, try Public PAIR.",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+        ).pack(pady=(0, 12))
+
+    def _show_patent_context_menu(self, event, row_data: Optional[dict] = None):
         """Show context menu for patents table."""
-        selection = self.patents_tree.selection()
-        if not selection:
+        if row_data is None and hasattr(self, "patents_table"):
+            row_data = self.patents_table.get_selected_row()
+
+        if not row_data:
             return
 
-        item = self.patents_tree.item(selection[0])
-        app_num = item['tags'][0] if item['tags'] else None
+        app_num = row_data.get("application_number")
 
         if not app_num:
             return
@@ -1099,6 +1098,14 @@ class PatentStatusTracker(ctk.CTk):
             menu,
             text="Open in Patent Center",
             command=lambda: [webbrowser.open(uspto_api.get_patent_center_url(app_num)), close_menu()],
+            width=180,
+            anchor="w"
+        ).pack(fill="x")
+
+        ctk.CTkButton(
+            menu,
+            text="Open Patent Center (Docs)",
+            command=lambda: [webbrowser.open(uspto_api.get_patent_center_documents_url(app_num)), close_menu()],
             width=180,
             anchor="w"
         ).pack(fill="x")
@@ -1191,26 +1198,25 @@ class PatentStatusTracker(ctk.CTk):
         patents = db.get_all_patents()
 
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'Application #', 'Title', 'Status', 'Status Date',
-                'Applicant', 'Inventor', 'Examiner', 'Art Unit',
-                'Filing Date', 'Last Checked'
-            ])
+            columns_by_key = {c["key"]: c for c in PATENT_COLUMNS}
+            header_by_key = {k: v["header"] for k, v in columns_by_key.items()}
+            header_by_key["last_checked"] = "Last Checked"
 
-            for p in patents:
-                writer.writerow([
-                    uspto_api.format_app_number(p['application_number']),
-                    p['title'] or '',
-                    p['current_status'] or '',
-                    p['status_date'] or '',
-                    p['applicant'] or '',
-                    p['inventor'] or '',
-                    p['examiner'] or '',
-                    p['art_unit'] or '',
-                    p['filing_date'] or '',
-                    p['last_checked'] or ''
-                ])
+            if hasattr(self, "patents_table"):
+                keys = [k for k in self.patents_table.get_visible_columns() if k in columns_by_key]
+            else:
+                keys = [c["key"] for c in PATENT_COLUMNS if c.get("default_visible")]
+
+            # Preserve old export behavior by always including last_checked at the end.
+            if "last_checked" not in keys:
+                keys.append("last_checked")
+
+            writer = csv.writer(f)
+            writer.writerow([header_by_key.get(k, k) for k in keys])
+
+            for patent in patents:
+                row = self._patent_to_row(patent)
+                writer.writerow([row.get(k, "") for k in keys])
 
         messagebox.showinfo("Exported", f"Data exported to:\n{filepath}")
 
@@ -1242,6 +1248,19 @@ class PatentStatusTracker(ctk.CTk):
 
 def run_app():
     """Run the application."""
+    # Basic file logging for troubleshooting (Documents/PatentStatusTracker/app.log)
+    try:
+        log_dir = db.get_db_path().parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            filename=str(log_dir / "app.log"),
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    except Exception:
+        # Logging should never prevent the app from starting.
+        pass
+
     app = PatentStatusTracker()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()

@@ -4,11 +4,122 @@ Background polling service for checking USPTO updates.
 
 import threading
 import time
+import json
+import logging
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from . import database as db
 from . import uspto_api
+
+logger = logging.getLogger(__name__)
+
+
+def _update_patent_from_api(patent_id: int, app_num: str) -> dict[str, Any]:
+    """
+    Fetch all supported USPTO endpoints for a single patent and update the database.
+
+    Returns:
+        dict with keys: metadata, new_events, total_events
+    """
+    raw_data = uspto_api.fetch_application(app_num)
+    parsed = uspto_api.parse_application_data(raw_data)
+    if not parsed:
+        raise ValueError("Could not parse USPTO response")
+
+    metadata = parsed["metadata"]
+    update_fields: dict[str, Any] = dict(metadata)
+    # Avoid passing the function's positional parameter again via kwargs.
+    update_fields.pop("application_number", None)
+    update_fields["last_checked"] = datetime.now().isoformat()
+
+    # PTA (optional)
+    try:
+        pta_raw = uspto_api.fetch_adjustment(app_num)
+        pta = uspto_api.parse_adjustment_data(pta_raw)
+        if pta:
+            expiration = uspto_api.calculate_expiration_date(
+                metadata.get("filing_date") or "",
+                pta.get("pta_total_days", 0),
+            )
+            update_fields.update(pta)
+            update_fields["expiration_date"] = expiration
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional PTA fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional PTA fetch crashed for %s", app_num)
+
+    # Continuity (optional)
+    try:
+        cont_raw = uspto_api.fetch_continuity(app_num)
+        continuity = uspto_api.parse_continuity_data(cont_raw)
+        db.save_continuity(patent_id, continuity.get("parents", []), continuity.get("children", []))
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional continuity fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional continuity fetch crashed for %s", app_num)
+
+    # Documents (optional)
+    try:
+        docs_raw = uspto_api.fetch_documents(app_num)
+        documents = uspto_api.parse_documents_data(docs_raw)
+        db.save_documents(patent_id, documents)
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional documents fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional documents fetch crashed for %s", app_num)
+
+    # Assignments (optional)
+    try:
+        assign_raw = uspto_api.fetch_assignment(app_num)
+        assignments = uspto_api.parse_assignment_data(assign_raw)
+        db.save_assignments(patent_id, assignments)
+        update_fields["assignment_bag"] = json.dumps(assignments)
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional assignments fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional assignments fetch crashed for %s", app_num)
+
+    # Attorney (optional)
+    try:
+        attorney_raw = uspto_api.fetch_attorney(app_num)
+        attorney_json = uspto_api.parse_attorney_data(attorney_raw)
+        update_fields["attorney_bag"] = attorney_json
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional attorney fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional attorney fetch crashed for %s", app_num)
+
+    # Foreign Priority (optional)
+    try:
+        priority_raw = uspto_api.fetch_foreign_priority(app_num)
+        priority_json = uspto_api.parse_foreign_priority_data(priority_raw)
+        update_fields["foreign_priority_bag"] = priority_json
+    except uspto_api.USPTOApiError as exc:
+        logger.debug("Optional foreign priority fetch failed for %s: %s", app_num, exc)
+    except Exception:
+        logger.exception("Optional foreign priority fetch crashed for %s", app_num)
+
+    # Single consolidated update
+    db.update_patent(app_num, **update_fields)
+
+    # Add new events
+    new_events: list[dict[str, Any]] = []
+    for event in parsed["events"]:
+        is_new = db.add_event(
+            patent_id,
+            event["event_code"],
+            event["event_description"],
+            event["event_date"],
+        )
+        if is_new:
+            new_events.append(event)
+
+    return {
+        "metadata": metadata,
+        "new_events": new_events,
+        "total_events": len(parsed["events"]),
+    }
 
 
 class PollingService:
@@ -76,56 +187,31 @@ class PollingService:
         }
 
         patents = db.get_all_patents()
+        try:
+            delay_seconds = float(db.get_setting("poll_delay_seconds", "1.0") or "1.0")
+        except ValueError:
+            delay_seconds = 1.0
 
         for patent in patents:
             try:
                 app_num = patent['application_number']
                 patent_id = patent['id']
+                update = _update_patent_from_api(patent_id, app_num)
+                metadata = update["metadata"]
 
-                # Fetch from USPTO
-                raw_data = uspto_api.fetch_application(app_num)
-                parsed = uspto_api.parse_application_data(raw_data)
-
-                if not parsed:
-                    continue
-
-                # Update patent metadata
-                db.update_patent(
-                    app_num,
-                    title=parsed['metadata']['title'],
-                    applicant=parsed['metadata']['applicant'],
-                    inventor=parsed['metadata']['inventor'],
-                    filing_date=parsed['metadata']['filing_date'],
-                    current_status=parsed['metadata']['current_status'],
-                    status_date=parsed['metadata']['status_date'],
-                    examiner=parsed['metadata']['examiner'],
-                    art_unit=parsed['metadata']['art_unit'],
-                    customer_number=parsed['metadata']['customer_number'],
-                    last_checked=datetime.now().isoformat()
-                )
-
-                # Add new events
-                new_count = 0
-                for event in parsed['events']:
-                    is_new = db.add_event(
-                        patent_id,
-                        event['event_code'],
-                        event['event_description'],
-                        event['event_date']
-                    )
-                    if is_new:
-                        new_count += 1
-                        result['new_events'].append({
-                            'application_number': app_num,
-                            'title': parsed['metadata']['title'],
-                            **event
-                        })
-
-                if new_count > 0:
+                if update["new_events"]:
                     result['updated_patents'] += 1
+                    for event in update["new_events"]:
+                        result["new_events"].append(
+                            {
+                                "application_number": app_num,
+                                "title": metadata.get("title"),
+                                **event,
+                            }
+                        )
 
-                # Small delay between requests to be nice to the API
-                time.sleep(0.5)
+                # Increased delay due to additional API calls (6 extra endpoints per patent)
+                time.sleep(delay_seconds)
 
             except uspto_api.USPTOApiError as e:
                 result['errors'].append(f"{patent['application_number']}: {str(e)}")
@@ -164,7 +250,7 @@ class PollingService:
 
 def refresh_single_patent(application_number: str) -> dict:
     """
-    Refresh a single patent's data.
+    Refresh a single patent's data from all USPTO endpoints.
 
     Returns:
         Dictionary with updated metadata and any new events
@@ -175,41 +261,6 @@ def refresh_single_patent(application_number: str) -> dict:
     if not patent:
         raise ValueError(f"Patent {application_number} not found in database")
 
-    raw_data = uspto_api.fetch_application(app_num)
-    parsed = uspto_api.parse_application_data(raw_data)
+    patent_id = patent['id']
 
-    if not parsed:
-        raise ValueError("Could not parse USPTO response")
-
-    # Update patent metadata
-    db.update_patent(
-        app_num,
-        title=parsed['metadata']['title'],
-        applicant=parsed['metadata']['applicant'],
-        inventor=parsed['metadata']['inventor'],
-        filing_date=parsed['metadata']['filing_date'],
-        current_status=parsed['metadata']['current_status'],
-        status_date=parsed['metadata']['status_date'],
-        examiner=parsed['metadata']['examiner'],
-        art_unit=parsed['metadata']['art_unit'],
-        customer_number=parsed['metadata']['customer_number'],
-        last_checked=datetime.now().isoformat()
-    )
-
-    # Add new events
-    new_events = []
-    for event in parsed['events']:
-        is_new = db.add_event(
-            patent['id'],
-            event['event_code'],
-            event['event_description'],
-            event['event_date']
-        )
-        if is_new:
-            new_events.append(event)
-
-    return {
-        'metadata': parsed['metadata'],
-        'new_events': new_events,
-        'total_events': len(parsed['events'])
-    }
+    return _update_patent_from_api(patent_id, app_num)

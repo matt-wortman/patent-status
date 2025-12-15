@@ -35,6 +35,7 @@ args = [
     # Hidden imports that PyInstaller might miss
     "--hidden-import=keyring.backends.Windows",
     "--hidden-import=customtkinter",
+    "--hidden-import=tksheet",
     "--hidden-import=PIL",
     "--hidden-import=PIL._tkinter_finder",
 ]
