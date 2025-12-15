@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""
-Patent Status Tracker - Main entry point.
+"""Patent Status Tracker - Main entry point.
 
-A standalone Windows application for monitoring USPTO patent application status.
-No installation required - just run the executable.
+A standalone Windows application for monitoring USPTO patent application status
+changes. Provides a modern GUI for tracking multiple patent applications with
+automatic background polling for updates.
 
 Features:
-- Track multiple patent applications
-- Automatic polling for status updates
-- Secure API key storage in Windows Credential Manager
-- Export to CSV
-- Links to Patent Center and Public PAIR
+    - Track multiple patent applications simultaneously
+    - Automatic background polling for status updates
+    - Secure API key storage in Windows Credential Manager
+    - Export patent data to CSV
+    - Direct links to Patent Center and Public PAIR
+    - Hierarchical event view with filtering
+    - Customizable table columns and display settings
+
+Usage:
+    python main.py              # Run in development mode
+    PatentStatusTracker.exe     # Run as compiled executable
+
+Requirements:
+    - Python 3.10+ (for development)
+    - USPTO Open Data Portal API key (free registration required)
+    - Windows OS (for Credential Manager integration)
 """
 
 import sys
@@ -30,7 +41,11 @@ from src.ui import run_app
 
 
 def main():
-    """Main entry point."""
+    """Main entry point for the application.
+
+    Initializes and runs the Patent Status Tracker GUI. Handles any fatal
+    errors by displaying an error dialog to the user.
+    """
     try:
         run_app()
     except Exception as e:

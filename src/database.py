@@ -1,6 +1,19 @@
-"""
-Database module for Patent Status Tracker.
-Uses SQLite stored in user's Documents folder.
+"""Database module for Patent Status Tracker.
+
+This module manages all SQLite database operations for the Patent Status Tracker
+application. The database is stored in the user's Documents folder and contains
+tables for patents, events, settings, continuity, documents, and assignments.
+
+Tables:
+    patents: Core patent application data and metadata
+    events: USPTO transaction codes and status events
+    settings: User preferences and configuration
+    continuity: Parent/child application relationships
+    documents: File wrapper documents metadata
+    assignments: Ownership assignment records
+
+The database uses SQLite with foreign key enforcement and automatic migrations
+for schema updates.
 """
 
 import sqlite3
@@ -13,14 +26,24 @@ from typing import Any, Optional
 
 
 def get_db_path() -> Path:
-    """Get the database path in user's Documents folder."""
+    """Get the database path in user's Documents folder.
+
+    Creates the PatentStatusTracker directory if it doesn't exist.
+
+    Returns:
+        Path: Full path to patents.db in Documents/PatentStatusTracker/
+    """
     documents = Path.home() / "Documents" / "PatentStatusTracker"
     documents.mkdir(parents=True, exist_ok=True)
     return documents / "patents.db"
 
 
 def get_connection() -> sqlite3.Connection:
-    """Get a database connection with row factory."""
+    """Get a database connection with row factory and foreign keys enabled.
+
+    Returns:
+        sqlite3.Connection: Configured database connection with row factory.
+    """
     conn = sqlite3.connect(get_db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -28,7 +51,12 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_database():
-    """Initialize the database schema."""
+    """Initialize the database schema.
+
+    Creates all necessary tables (patents, events, settings) with appropriate
+    indexes if they don't already exist. Automatically runs schema migrations
+    to add new columns and tables for expanded USPTO API support.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -88,7 +116,12 @@ def init_database():
 
 
 def migrate_database():
-    """Apply schema migrations for new API fields."""
+    """Apply schema migrations for new API fields.
+
+    Adds new columns to existing tables to support additional USPTO API data.
+    Creates new tables for continuity, documents, and assignments if they don't exist.
+    Safe to run multiple times - skips columns/tables that already exist.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -226,8 +259,15 @@ def migrate_database():
 
 
 def add_patent(application_number: str) -> Optional[int]:
-    """Add a new patent to track. Returns patent ID or None if already exists."""
-    # Normalize application number (remove slashes, spaces)
+    """Add a new patent to track.
+
+    Args:
+        application_number: Patent application number (e.g., "17/940,142" or "17940142").
+
+    Returns:
+        int: The new patent ID if successfully added.
+        None: If the patent already exists in the database.
+    """
     app_num = application_number.replace("/", "").replace(" ", "").replace(",", "")
 
     conn = get_connection()
@@ -248,7 +288,17 @@ def add_patent(application_number: str) -> Optional[int]:
 
 
 def remove_patent(application_number: str) -> bool:
-    """Remove a patent from tracking."""
+    """Remove a patent from tracking.
+
+    Deletes the patent and all related records (events, continuity, documents, assignments)
+    from the database.
+
+    Args:
+        application_number: Patent application number to remove.
+
+    Returns:
+        bool: True if patent was found and removed, False if not found.
+    """
     app_num = application_number.replace("/", "").replace(" ", "").replace(",", "")
 
     conn = get_connection()
@@ -274,7 +324,11 @@ def remove_patent(application_number: str) -> bool:
 
 
 def get_all_patents() -> list:
-    """Get all tracked patents."""
+    """Get all tracked patents.
+
+    Returns:
+        list: List of patent dictionaries with all fields, ordered by application number.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -286,7 +340,15 @@ def get_all_patents() -> list:
 
 
 def get_patent_by_app_number(application_number: str) -> Optional[dict]:
-    """Get a patent by application number."""
+    """Get a patent by application number.
+
+    Args:
+        application_number: Patent application number to retrieve.
+
+    Returns:
+        dict: Patent data with all fields if found.
+        None: If patent not found in database.
+    """
     app_num = application_number.replace("/", "").replace(" ", "").replace(",", "")
 
     conn = get_connection()
@@ -299,7 +361,13 @@ def get_patent_by_app_number(application_number: str) -> Optional[dict]:
 
 
 def update_patent(application_number: str, **kwargs):
-    """Update patent metadata."""
+    """Update patent metadata fields.
+
+    Args:
+        application_number: Patent application number to update.
+        **kwargs: Field names and values to update (e.g., title="New Title").
+                  Only allowed fields from the schema will be updated.
+    """
     app_num = application_number.replace("/", "").replace(" ", "").replace(",", "")
 
     conn = get_connection()
@@ -350,7 +418,17 @@ def update_patent(application_number: str, **kwargs):
 
 
 def add_event(patent_id: int, event_code: str, event_description: str, event_date: str) -> bool:
-    """Add an event for a patent. Returns True if new event, False if already exists."""
+    """Add an event for a patent.
+
+    Args:
+        patent_id: Database ID of the patent.
+        event_code: USPTO event code (e.g., "CTNF", "NOA").
+        event_description: Human-readable event description.
+        event_date: Event date in YYYY-MM-DD format.
+
+    Returns:
+        bool: True if event was newly added, False if it already existed.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -367,12 +445,15 @@ def add_event(patent_id: int, event_code: str, event_description: str, event_dat
         return False
 
 
-def get_recent_events(days: int = 7, event_types: list = None) -> list:
+def get_recent_events(days: int = 7, event_types: list[str] | None = None) -> list[dict[str, Any]]:
     """Get events that occurred at USPTO in the last N days.
 
     Args:
-        days: Number of days to look back
-        event_types: Optional list of event code prefixes to filter (e.g., ['CTNF', 'CTFR'])
+        days: Number of days to look back.
+        event_types: Optional list of exact event codes to filter by (e.g., ['CTNF', 'CTFR']).
+
+    Returns:
+        list: List of event dictionaries joined with patent application number, title, and applicant.
     """
     conn = get_connection()
     cursor = conn.cursor()
@@ -402,11 +483,17 @@ def get_recent_events(days: int = 7, event_types: list = None) -> list:
     return events
 
 
-def get_recent_events_grouped(days: int = 7, event_types: list = None) -> dict:
+def get_recent_events_grouped(
+    days: int = 7, event_types: list[str] | None = None
+) -> dict[str, dict[str, Any]]:
     """Get events grouped by application number.
 
+    Args:
+        days: Number of days to look back.
+        event_types: Optional list of exact event codes to filter by.
+
     Returns:
-        dict: {app_number: {'patent': {...}, 'events': [...]}}
+        dict: Mapping like `{app_number: {'patent': {...}, 'events': [...]}}`.
     """
     events = get_recent_events(days, event_types)
 
@@ -428,7 +515,11 @@ def get_recent_events_grouped(days: int = 7, event_types: list = None) -> dict:
 
 
 def get_all_event_codes() -> list:
-    """Get all unique event codes in the database."""
+    """Get all unique event codes in the database.
+
+    Returns:
+        list: Sorted list of distinct event codes.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT event_code FROM events ORDER BY event_code")
@@ -438,7 +529,14 @@ def get_all_event_codes() -> list:
 
 
 def get_events_for_patent(patent_id: int) -> list:
-    """Get all events for a specific patent."""
+    """Get all events for a specific patent.
+
+    Args:
+        patent_id: Database ID of the patent.
+
+    Returns:
+        list: List of event dictionaries ordered by event date descending.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -454,7 +552,11 @@ def get_events_for_patent(patent_id: int) -> list:
 
 
 def mark_events_seen(patent_id: int):
-    """Mark all events for a patent as seen (not new)."""
+    """Mark all events for a patent as seen (not new).
+
+    Args:
+        patent_id: Database ID of the patent.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE events SET is_new = 0 WHERE patent_id = ?", (patent_id,))
@@ -462,8 +564,16 @@ def mark_events_seen(patent_id: int):
     conn.close()
 
 
-def get_setting(key: str, default: str = None) -> Optional[str]:
-    """Get a setting value."""
+def get_setting(key: str, default: str | None = None) -> Optional[str]:
+    """Get a setting value.
+
+    Args:
+        key: Setting key.
+        default: Default value to return if the key is not present.
+
+    Returns:
+        Optional[str]: Stored setting value, or `default` if missing.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -473,7 +583,12 @@ def get_setting(key: str, default: str = None) -> Optional[str]:
 
 
 def set_setting(key: str, value: str):
-    """Set a setting value."""
+    """Set a setting value.
+
+    Args:
+        key: Setting key.
+        value: Setting value to store.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -486,12 +601,27 @@ def set_setting(key: str, value: str):
 # ---- Table Preference Helpers (tksheet) ----
 
 def save_table_preferences(table_id: str, prefs: dict[str, Any]) -> None:
-    """Save table preferences as JSON in the settings table."""
+    """Save table preferences as JSON in the settings table.
+
+    Args:
+        table_id: Logical table identifier (e.g., "patents").
+        prefs: Preferences dictionary to serialize as JSON.
+    """
     set_setting(f"{table_id}_table_prefs", json.dumps(prefs))
 
 
 def load_table_preferences(table_id: str) -> dict[str, Any] | None:
-    """Load table preferences from settings; returns None if missing or corrupted."""
+    """Load table preferences from settings.
+
+    Includes backward-compatible migration from legacy settings keys.
+
+    Args:
+        table_id: Logical table identifier (e.g., "patents").
+
+    Returns:
+        dict: Parsed preferences dictionary.
+        None: If preferences are missing or cannot be parsed.
+    """
     raw = get_setting(f"{table_id}_table_prefs", None)
     if raw:
         try:
@@ -522,7 +652,15 @@ def load_table_preferences(table_id: str) -> dict[str, Any] | None:
 
 
 def default_table_preferences(columns: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build default preferences from column definitions."""
+    """Build default preferences from column definitions.
+
+    Args:
+        columns: Column definition list (each dict should include `key`, and may include
+                 `default_visible` and `width`).
+
+    Returns:
+        dict: Default table preferences.
+    """
     visible = [c["key"] for c in columns if c.get("default_visible")]
     widths = {c["key"]: int(c.get("width", 120)) for c in columns}
     return {
@@ -534,12 +672,17 @@ def default_table_preferences(columns: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def validate_table_preferences(prefs: dict[str, Any], columns: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Validate and migrate table preferences.
-    - Drops unknown column keys
-    - Appends any new default-visible columns
-    - Filters invalid widths
-    - Resets to defaults if nothing remains
+    """Validate and migrate table preferences.
+
+    Drops unknown column keys, appends any new default-visible columns, and filters
+    invalid widths.
+
+    Args:
+        prefs: Raw preferences dictionary (possibly user-edited or from older versions).
+        columns: Column definitions used to validate keys and defaults.
+
+    Returns:
+        dict: Cleaned and migrated preferences dictionary.
     """
     valid_keys = [c["key"] for c in columns if isinstance(c.get("key"), str)]
     valid_key_set = set(valid_keys)
@@ -584,7 +727,13 @@ def validate_table_preferences(prefs: dict[str, Any], columns: list[dict[str, An
 # ---- Continuity Table Functions ----
 
 def save_continuity(patent_id: int, parents: list, children: list):
-    """Save continuity data for a patent (replaces existing data)."""
+    """Save continuity data for a patent (replaces existing data).
+
+    Args:
+        patent_id: Database ID of the patent.
+        parents: List of parsed parent relationship dictionaries.
+        children: List of parsed child relationship dictionaries.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -624,7 +773,14 @@ def save_continuity(patent_id: int, parents: list, children: list):
 
 
 def get_continuity(patent_id: int) -> dict:
-    """Get continuity data for a patent."""
+    """Get continuity data for a patent.
+
+    Args:
+        patent_id: Database ID of the patent.
+
+    Returns:
+        dict: Dictionary with `parents` and `children` lists of continuity records.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -644,7 +800,12 @@ def get_continuity(patent_id: int) -> dict:
 # ---- Documents Table Functions ----
 
 def save_documents(patent_id: int, documents: list):
-    """Save document data for a patent (upserts existing data)."""
+    """Save document data for a patent (upserts existing data).
+
+    Args:
+        patent_id: Database ID of the patent.
+        documents: List of parsed document dictionaries.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -664,13 +825,21 @@ def save_documents(patent_id: int, documents: list):
     conn.close()
 
 
-def get_documents(patent_id: int, doc_types: list = None) -> list:
-    """Get documents for a patent, optionally filtered by document code."""
+def get_documents(patent_id: int, doc_types: list[str] | None = None) -> list[dict[str, Any]]:
+    """Get documents for a patent, optionally filtered by document code.
+
+    Args:
+        patent_id: Database ID of the patent.
+        doc_types: Optional list of exact document codes to include.
+
+    Returns:
+        list: List of document dictionaries ordered by official date descending.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
     query = "SELECT * FROM documents WHERE patent_id = ?"
-    params = [patent_id]
+    params: list[int | str] = [patent_id]
 
     if doc_types:
         placeholders = ','.join('?' * len(doc_types))
@@ -689,7 +858,12 @@ def get_documents(patent_id: int, doc_types: list = None) -> list:
 # ---- Assignments Table Functions ----
 
 def save_assignments(patent_id: int, assignments: list):
-    """Save assignment data for a patent."""
+    """Save assignment data for a patent (replaces existing data).
+
+    Args:
+        patent_id: Database ID of the patent.
+        assignments: List of parsed assignment dictionaries.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -717,7 +891,14 @@ def save_assignments(patent_id: int, assignments: list):
 
 
 def get_assignments(patent_id: int) -> list:
-    """Get assignments for a patent."""
+    """Get assignments for a patent.
+
+    Args:
+        patent_id: Database ID of the patent.
+
+    Returns:
+        list: List of assignment dictionaries ordered by recorded date descending.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 

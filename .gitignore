@@ -29,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+AVAILABLE_DATA_FOR_STAFF_REVIEW.md
+PLAN_B.md
+.claude/settings.local.json

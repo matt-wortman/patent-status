@@ -1,5 +1,22 @@
-"""
-Main UI for Patent Status Tracker using CustomTkinter.
+"""Main UI for Patent Status Tracker using CustomTkinter.
+
+This module implements the graphical user interface for the Patent Status Tracker
+application using the CustomTkinter framework. The UI consists of three main tabs:
+
+1. Updates Tab: Shows recent patent events in a hierarchical tree view, grouped by
+   application with filtering by time range and event type.
+
+2. All Patents Tab: Displays all tracked patents in a customizable table with
+   sortable/resizable columns, context menus, and inline refresh capabilities.
+
+3. Settings Tab: Provides configuration for USPTO API key, polling intervals,
+   display settings (font size), and data export functionality.
+
+The UI integrates with the polling service for background updates and provides
+real-time status feedback in the status bar.
+
+Key Classes:
+    PatentStatusTracker: Main application window (inherits from ctk.CTk).
 """
 
 import customtkinter as ctk
@@ -32,7 +49,16 @@ EVENT_CATEGORIES = {
 
 
 class PatentStatusTracker(ctk.CTk):
-    """Main application window."""
+    """Main application window for Patent Status Tracker.
+
+    Provides a multi-tab interface for viewing and managing tracked patents,
+    with integrated polling service and status notifications.
+
+    Attributes:
+        polling_service: Background polling service instance.
+        tabview: Main tab container widget.
+        patents_table: DataTable widget for the All Patents tab.
+    """
 
     def __init__(self):
         super().__init__()

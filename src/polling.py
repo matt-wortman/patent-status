@@ -1,5 +1,12 @@
-"""
-Background polling service for checking USPTO updates.
+"""Background polling service for checking USPTO updates.
+
+This module provides a background service that periodically polls the USPTO API
+to check for updates to tracked patents. It fetches data from multiple USPTO
+endpoints (application, adjustment, continuity, documents, assignments, attorney,
+and foreign priority) and updates the local database.
+
+The PollingService class runs in a background thread and can be configured with
+custom polling intervals and callback functions for update notifications.
 """
 
 import threading
@@ -16,11 +23,30 @@ logger = logging.getLogger(__name__)
 
 
 def _update_patent_from_api(patent_id: int, app_num: str) -> dict[str, Any]:
-    """
-    Fetch all supported USPTO endpoints for a single patent and update the database.
+    """Fetch all supported USPTO endpoints for a single patent and update the database.
+
+    Fetches data from multiple USPTO API endpoints:
+    - Application data (metadata and events)
+    - Patent term adjustment (PTA)
+    - Continuity (parent/child relationships)
+    - Documents (file wrapper)
+    - Assignments (ownership)
+    - Attorney/agent information
+    - Foreign priority claims
+
+    Args:
+        patent_id: Database ID of the patent to update.
+        app_num: Normalized application number.
 
     Returns:
-        dict with keys: metadata, new_events, total_events
+        dict: Dictionary with keys:
+            - metadata: Application metadata dictionary
+            - new_events: List of newly discovered events
+            - total_events: Total number of events in USPTO record
+
+    Raises:
+        ValueError: If USPTO response cannot be parsed.
+        USPTOApiError: If required API calls fail.
     """
     raw_data = uspto_api.fetch_application(app_num)
     parsed = uspto_api.parse_application_data(raw_data)
@@ -123,17 +149,20 @@ def _update_patent_from_api(patent_id: int, app_num: str) -> dict[str, Any]:
 
 
 class PollingService:
-    """
-    Background service that polls USPTO API for updates.
+    """Background service that polls USPTO API for updates.
+
+    Runs in a daemon thread and periodically checks all tracked patents for updates.
+    Supports configurable polling intervals and callback functions for notifications.
     """
 
     def __init__(self, on_update: Optional[Callable] = None, on_error: Optional[Callable] = None):
-        """
-        Initialize the polling service.
+        """Initialize the polling service.
 
         Args:
-            on_update: Callback function called when updates are found (receives list of new events)
-            on_error: Callback function called on errors (receives error message)
+            on_update: Optional callback function called when updates are found.
+                      Receives a list of new event dictionaries.
+            on_error: Optional callback function called on errors.
+                     Receives a list of error message strings.
         """
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -143,7 +172,12 @@ class PollingService:
         self._last_poll: Optional[datetime] = None
 
     def start(self, interval_minutes: int = None):
-        """Start the polling service."""
+        """Start the polling service in a background thread.
+
+        Args:
+            interval_minutes: Optional polling interval in minutes. If not provided,
+                            uses the previously set interval (default: 1440 = 24 hours).
+        """
         if self._running:
             return
 
@@ -155,29 +189,40 @@ class PollingService:
         self._thread.start()
 
     def stop(self):
-        """Stop the polling service."""
+        """Stop the polling service and wait for the background thread to finish."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
 
     def set_interval(self, minutes: int):
-        """Set the polling interval in minutes."""
+        """Set the polling interval in minutes.
+
+        Args:
+            minutes: Polling interval in minutes.
+        """
         self._interval_minutes = minutes
 
     def get_last_poll_time(self) -> Optional[datetime]:
-        """Get the last poll time."""
+        """Get the last poll time.
+
+        Returns:
+            datetime: Timestamp of last poll, or None if never polled.
+        """
         return self._last_poll
 
     def poll_now(self) -> dict:
-        """
-        Perform an immediate poll of all tracked patents.
+        """Perform an immediate poll of all tracked patents.
+
+        Fetches updates for all patents in the database and saves any new events.
+        Respects the poll_delay_seconds setting to avoid overwhelming the USPTO API.
 
         Returns:
-            Dictionary with:
-            - success: bool
-            - new_events: list of new events found
-            - errors: list of error messages
+            dict: Dictionary with keys:
+                - success (bool): True if all patents updated successfully
+                - new_events (list): List of new event dictionaries found
+                - errors (list): List of error message strings
+                - updated_patents (int): Number of patents with new events
         """
         result = {
             'success': True,
@@ -226,7 +271,11 @@ class PollingService:
         return result
 
     def _poll_loop(self):
-        """Background polling loop."""
+        """Background polling loop (private method).
+
+        Continuously polls for updates at the configured interval until stopped.
+        Calls the on_update and on_error callbacks as appropriate.
+        """
         while self._running:
             try:
                 result = self.poll_now()
@@ -249,11 +298,23 @@ class PollingService:
 
 
 def refresh_single_patent(application_number: str) -> dict:
-    """
-    Refresh a single patent's data from all USPTO endpoints.
+    """Refresh a single patent's data from all USPTO endpoints.
+
+    Fetches the latest data for one patent and updates the database. Useful for
+    on-demand refreshes triggered by user actions.
+
+    Args:
+        application_number: Patent application number (formatted or normalized).
 
     Returns:
-        Dictionary with updated metadata and any new events
+        dict: Dictionary with keys:
+            - metadata: Application metadata dictionary
+            - new_events: List of newly discovered events
+            - total_events: Total number of events
+
+    Raises:
+        ValueError: If patent is not found in the database.
+        USPTOApiError: If API calls fail.
     """
     app_num = uspto_api.normalize_app_number(application_number)
     patent = db.get_patent_by_app_number(app_num)

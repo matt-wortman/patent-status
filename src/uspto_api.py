@@ -1,6 +1,20 @@
-"""
-USPTO Open Data Portal API client.
-Handles all communication with the USPTO API.
+"""USPTO Open Data Portal API client.
+
+This module provides a complete client for the USPTO Open Data Portal API,
+handling authentication, data fetching, and response parsing for patent
+application data.
+
+Supported API endpoints:
+    - /applications/{appNum} - Core application data and events
+    - /applications/{appNum}/adjustment - Patent term adjustment (PTA)
+    - /applications/{appNum}/continuity - Parent/child relationships
+    - /applications/{appNum}/documents - File wrapper documents
+    - /applications/{appNum}/assignment - Ownership assignments
+    - /applications/{appNum}/attorney - Attorney/agent information
+    - /applications/{appNum}/foreign-priority - Foreign priority claims
+
+All functions use the API key stored in Windows Credential Manager via the
+credentials module.
 """
 
 import json
@@ -20,7 +34,14 @@ class USPTOApiError(Exception):
 
 
 def _get_headers() -> Dict[str, str]:
-    """Get headers with API key for USPTO requests."""
+    """Get headers with API key for USPTO requests.
+
+    Returns:
+        Dict[str, str]: Request headers with X-API-Key and Accept fields.
+
+    Raises:
+        USPTOApiError: If no API key is configured.
+    """
     api_key = get_api_key()
     if not api_key:
         raise USPTOApiError("No API key configured. Please add your USPTO API key in Settings.")
@@ -32,12 +53,26 @@ def _get_headers() -> Dict[str, str]:
 
 
 def normalize_app_number(app_number: str) -> str:
-    """Normalize application number by removing slashes, spaces, commas."""
+    """Normalize application number by removing slashes, spaces, and commas.
+
+    Args:
+        app_number: Application number in any format (e.g., "17/940,142" or "17940142").
+
+    Returns:
+        str: Normalized application number (e.g., "17940142").
+    """
     return str(app_number).replace("/", "").replace(" ", "").replace(",", "")
 
 
 def format_app_number(app_number: str) -> str:
-    """Format application number for display (e.g., 17/940,142)."""
+    """Format application number for display (e.g., 17/940,142).
+
+    Args:
+        app_number: Application number in any format.
+
+    Returns:
+        str: Formatted application number with slashes and commas.
+    """
     app_num = normalize_app_number(app_number)
     if len(app_num) >= 8:
         return f"{app_num[:2]}/{app_num[2:5]},{app_num[5:]}"
@@ -45,17 +80,16 @@ def format_app_number(app_number: str) -> str:
 
 
 def fetch_application(application_number: str) -> Dict[str, Any]:
-    """
-    Fetch full application data from USPTO API.
+    """Fetch full application data from USPTO API.
 
     Args:
-        application_number: The patent application number (with or without formatting)
+        application_number: The patent application number (with or without formatting).
 
     Returns:
-        Dictionary containing application metadata and events
+        Dict[str, Any]: Raw USPTO API response containing application metadata and events.
 
     Raises:
-        USPTOApiError: If the API request fails
+        USPTOApiError: If the API request fails (invalid key, not found, network error).
     """
     app_num = normalize_app_number(application_number)
 
@@ -89,13 +123,16 @@ def fetch_application(application_number: str) -> Dict[str, Any]:
 
 
 def parse_application_data(raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Parse raw USPTO API response into a cleaner format.
+    """Parse raw USPTO application response into metadata and events.
+
+    Args:
+        raw_data: Raw USPTO JSON response returned by `fetch_application()`.
 
     Returns:
-        Dictionary with:
-        - metadata: Application metadata (all available fields)
-        - events: List of events/transactions
+        Optional[Dict[str, Any]]: Parsed data with keys:
+            - metadata: Application metadata flattened into simple fields (and some JSON strings)
+            - events: List of event/transaction dictionaries
+        Returns None if the response is missing expected structures.
     """
     bag = raw_data.get('patentFileWrapperDataBag') or []
     if not isinstance(bag, list) or not bag:
@@ -191,9 +228,13 @@ def parse_application_data(raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 
 def validate_api_key(api_key: str) -> bool:
-    """
-    Validate an API key by making a test request.
-    Returns True if valid, False otherwise.
+    """Validate an API key by making a test request.
+
+    Args:
+        api_key: Candidate USPTO Open Data Portal API key.
+
+    Returns:
+        bool: True if the key appears valid, False otherwise.
     """
     try:
         response = requests.get(
@@ -210,19 +251,42 @@ def validate_api_key(api_key: str) -> bool:
 
 
 def get_patent_center_url(application_number: str) -> str:
-    """Get the Patent Center URL for an application."""
+    """Get the Patent Center URL for an application.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        str: Patent Center application landing page URL.
+    """
     app_num = normalize_app_number(application_number)
     return f"https://patentcenter.uspto.gov/applications/{app_num}"
 
 
 def get_patent_center_documents_url(application_number: str) -> str:
-    """Get a Patent Center documents URL for an application (often more reliable than the landing page)."""
+    """Get a Patent Center documents URL for an application.
+
+    This route often works more reliably than the application landing page.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        str: Patent Center IFW documents URL.
+    """
     app_num = normalize_app_number(application_number)
     return f"https://patentcenter.uspto.gov/applications/{app_num}/ifw/docs"
 
 
 def get_public_pair_url(application_number: str) -> str:
-    """Get the Public PAIR URL for an application."""
+    """Get the Public PAIR URL for an application.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        str: Public PAIR URL for the application.
+    """
     app_num = normalize_app_number(application_number)
     return f"https://portal.uspto.gov/pair/PublicPair?appNumber={app_num}"
 
@@ -230,7 +294,17 @@ def get_public_pair_url(application_number: str) -> str:
 # ---- Patent Term Adjustment (PTA) Endpoint ----
 
 def fetch_adjustment(application_number: str) -> Dict[str, Any]:
-    """Fetch patent term adjustment (PTA) data from USPTO API."""
+    """Fetch patent term adjustment (PTA) data from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw PTA response. Returns an empty dict if no PTA data exists.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -251,7 +325,15 @@ def fetch_adjustment(application_number: str) -> Dict[str, Any]:
 
 
 def parse_adjustment_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse PTA response into structured data."""
+    """Parse PTA response into a structured dict suitable for DB storage.
+
+    Args:
+        raw_data: Raw PTA JSON response.
+
+    Returns:
+        Dict[str, Any]: PTA fields (e.g., `pta_total_days`, `pta_a_delay`, ...). Returns
+        an empty dict if `raw_data` is empty.
+    """
     if not raw_data:
         return {}
 
@@ -268,7 +350,16 @@ def parse_adjustment_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def calculate_expiration_date(filing_date: str, pta_days: int) -> str:
-    """Calculate patent expiration date (filing + 20 years + PTA)."""
+    """Calculate the estimated expiration date (filing + 20 years + PTA).
+
+    Args:
+        filing_date: Filing date in YYYY-MM-DD format.
+        pta_days: Patent term adjustment days to add.
+
+    Returns:
+        str: Expiration date in YYYY-MM-DD format, or an empty string if it cannot be
+        calculated (missing/invalid filing date).
+    """
     if not filing_date:
         return ''
 
@@ -292,7 +383,18 @@ def calculate_expiration_date(filing_date: str, pta_days: int) -> str:
 # ---- Continuity Endpoint ----
 
 def fetch_continuity(application_number: str) -> Dict[str, Any]:
-    """Fetch parent/child continuity data from USPTO API."""
+    """Fetch parent/child continuity data from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw continuity response. Returns an empty continuity payload if
+        the application has no continuity data.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -313,7 +415,15 @@ def fetch_continuity(application_number: str) -> Dict[str, Any]:
 
 
 def parse_continuity_data(raw_data: Dict[str, Any]) -> Dict[str, list]:
-    """Parse continuity response into parent and child lists."""
+    """Parse continuity response into parent and child relationship lists.
+
+    Args:
+        raw_data: Raw continuity JSON response.
+
+    Returns:
+        Dict[str, list]: Dictionary with keys `parents` and `children`, each containing
+        a list of relationship dictionaries.
+    """
     parents = []
     for parent in raw_data.get('parentContinuityBag', []):
         parents.append({
@@ -346,7 +456,18 @@ def parse_continuity_data(raw_data: Dict[str, Any]) -> Dict[str, list]:
 # ---- Documents Endpoint ----
 
 def fetch_documents(application_number: str) -> Dict[str, Any]:
-    """Fetch file wrapper documents from USPTO API."""
+    """Fetch file wrapper documents from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw documents response. Returns an empty document payload if
+        the application has no documents.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -367,7 +488,14 @@ def fetch_documents(application_number: str) -> Dict[str, Any]:
 
 
 def parse_documents_data(raw_data: Dict[str, Any]) -> list:
-    """Parse documents response into list of document info."""
+    """Parse documents response into a list of document dictionaries.
+
+    Args:
+        raw_data: Raw documents JSON response.
+
+    Returns:
+        list: List of document dictionaries for storage and display.
+    """
     documents = []
     for doc in raw_data.get('documentBag', []):
         # Store all download options as JSON
@@ -401,7 +529,18 @@ def parse_documents_data(raw_data: Dict[str, Any]) -> list:
 # ---- Assignment Endpoint ----
 
 def fetch_assignment(application_number: str) -> Dict[str, Any]:
-    """Fetch assignment/ownership data from USPTO API."""
+    """Fetch assignment/ownership data from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw assignment response. Returns an empty assignment payload if
+        the application has no assignment data.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -422,7 +561,14 @@ def fetch_assignment(application_number: str) -> Dict[str, Any]:
 
 
 def parse_assignment_data(raw_data: Dict[str, Any]) -> list:
-    """Parse assignment response into list of assignment records."""
+    """Parse assignment response into a list of assignment records.
+
+    Args:
+        raw_data: Raw assignment JSON response.
+
+    Returns:
+        list: List of assignment dictionaries.
+    """
     assignments = []
     for assignment in raw_data.get('patentAssignmentBag', []):
         assignments.append({
@@ -445,7 +591,17 @@ def parse_assignment_data(raw_data: Dict[str, Any]) -> list:
 # ---- Attorney Endpoint ----
 
 def fetch_attorney(application_number: str) -> Dict[str, Any]:
-    """Fetch attorney/agent data from USPTO API."""
+    """Fetch attorney/agent data from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw attorney response. Returns an empty dict if no attorney data exists.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -466,14 +622,32 @@ def fetch_attorney(application_number: str) -> Dict[str, Any]:
 
 
 def parse_attorney_data(raw_data: Dict[str, Any]) -> str:
-    """Parse attorney response and return as JSON string for storage."""
+    """Parse attorney response into a JSON string for storage.
+
+    Args:
+        raw_data: Raw attorney JSON response.
+
+    Returns:
+        str: JSON string representation of the attorney response (or `'[]'` if missing).
+    """
     return json.dumps(raw_data) if raw_data else '[]'
 
 
 # ---- Foreign Priority Endpoint ----
 
 def fetch_foreign_priority(application_number: str) -> Dict[str, Any]:
-    """Fetch foreign priority claims from USPTO API."""
+    """Fetch foreign priority claims from the USPTO API.
+
+    Args:
+        application_number: Application number in any format.
+
+    Returns:
+        Dict[str, Any]: Raw foreign priority response. Returns an empty payload if no
+        foreign priority data exists.
+
+    Raises:
+        USPTOApiError: If the request fails for reasons other than "not found".
+    """
     app_num = normalize_app_number(application_number)
 
     try:
@@ -494,7 +668,14 @@ def fetch_foreign_priority(application_number: str) -> Dict[str, Any]:
 
 
 def parse_foreign_priority_data(raw_data: Dict[str, Any]) -> str:
-    """Parse foreign priority response and return as JSON string for storage."""
+    """Parse foreign priority response into a JSON string for storage.
+
+    Args:
+        raw_data: Raw foreign priority JSON response.
+
+    Returns:
+        str: JSON string representation of the foreign priority bag.
+    """
     return json.dumps(raw_data.get('foreignPriorityBag', []))
 
 
@@ -517,7 +698,17 @@ SIGNIFICANT_EVENT_CODES = {
 
 
 def is_significant_event(event_code: str) -> bool:
-    """Check if an event code represents a significant status change."""
+    """Check if an event code represents a significant status change.
+
+    Performs an exact match against known significant codes and a prefix match
+    for common code families.
+
+    Args:
+        event_code: USPTO event/transaction code.
+
+    Returns:
+        bool: True if the code is considered significant.
+    """
     # Check exact match
     if event_code in SIGNIFICANT_EVENT_CODES:
         return True
